@@ -25,8 +25,8 @@ const PAUSE_LABELS = [
   "awaiting merge",
 ];
 const DAY = 24 * 60 * 60 * 1000;
-const WARN_AFTER = 5 * DAY;
-const GRACE_PERIOD = 3 * DAY;
+const WARN_AFTER = 30;
+const GRACE_PERIOD = 30;
 
 const sameUser = (a, b) =>
   Boolean(a && b && a.toLowerCase() === b.toLowerCase());
