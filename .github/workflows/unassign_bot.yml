@@ -19,7 +19,8 @@ name: Unassign Inactive Contributors
 
 on:
   schedule:
-    - cron: "0 10 * * *"
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
