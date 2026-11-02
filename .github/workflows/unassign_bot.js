@@ -15,8 +15,6 @@
 // specific language governing permissions and limitations
 // under the License.
 
-const helpers = require("./dev_pr/helpers.js");
-
 const LABELS = ["good-first-issue", "good-second-issue"];
 const PAUSE_LABELS = [
   "awaiting review",
@@ -53,7 +51,6 @@ module.exports = async ({ github, context }) => {
     await comment(issue_number, message);
   };
 
-  const openPrs = await paginate(github.rest.pulls.list, { state: "open" });
   const processed = new Set();
   let failures = 0;
 
@@ -72,43 +69,43 @@ module.exports = async ({ github, context }) => {
 
       for (const { login } of issue.assignees) {
         try {
-          const linkedPrs = openPrs.filter(pr => {
-            const ref = helpers.detectIssue(pr.title);
-            return (
-              ref?.kind === "github" &&
-              Number(ref.id) === issue.number &&
-              sameUser(pr.user.login, login)
-            );
+          // Timeline includes issue activity and the current details of linked PRs.
+          const events = await paginate(github.rest.issues.listEventsForTimeline, {
+            issue_number: issue.number,
           });
+
+          const linkedPrs = events
+            .filter(
+              event =>
+                event.event === "cross-referenced" &&
+                event.source?.issue?.pull_request
+            )
+            .map(event => event.source.issue)
+            .filter(pr => sameUser(pr.user?.login, login));
+
+          const openLinkedPrs = linkedPrs.filter(pr => pr.state === "open");
 
           // A linked PR awaiting review or merge pauses the inactivity timer.
           if (
-            linkedPrs.some(pr =>
-              pr.labels.some(label => PAUSE_LABELS.includes(label.name.toLowerCase()))
+            openLinkedPrs.some(pr =>
+              pr.labels?.some(label =>
+                PAUSE_LABELS.includes(label.name.toLowerCase())
+              )
             )
           ) {
             continue;
           }
 
-          // Timeline events include assignment, comments, reviews and label changes.
-          const events = await paginate(github.rest.issues.listEventsForTimeline, {
-            issue_number: issue.number,
-          });
-
-          const closedUnmergedPr = events.find(
-            event =>
-              event.event === "cross-referenced" &&
-              event.source?.issue?.pull_request &&
-              event.source.issue.state === "closed" &&
-              !event.source.issue.pull_request.merged_at &&
-              sameUser(event.source.issue.user?.login, login)
+          // Unassign if a linked PR was closed without being merged.
+          const closedUnmergedPr = linkedPrs.find(
+            pr => pr.state === "closed" && !pr.pull_request.merged_at
           );
 
           if (closedUnmergedPr) {
             await unassign(
               issue.number,
               login,
-              `This issue was automatically unassigned from @${login} because their linked pull request #${closedUnmergedPr.source.issue.number} was closed without being merged.`
+              `This issue was automatically unassigned from @${login} because their linked pull request #${closedUnmergedPr.number} was closed without being merged.`
             );
             continue;
           }
@@ -133,7 +130,7 @@ module.exports = async ({ github, context }) => {
             }
           }
 
-          for (const pr of linkedPrs) {
+          for (const pr of openLinkedPrs) {
             const [prEvents, reviewComments, commits] = await Promise.all([
               paginate(github.rest.issues.listEventsForTimeline, {
                 issue_number: pr.number,
