@@ -42,7 +42,7 @@ module.exports = async ({ github, context }) => {
   const comment = (issue_number, body) =>
     github.rest.issues.createComment({ owner, repo, issue_number, body });
 
-  const unassign = async (issue_number, login) => {
+  const unassign = async (issue_number, login, message) => {
     console.log(`Unassigning ${login} from #${issue_number}`);
     await github.rest.issues.removeAssignees({
       owner,
@@ -50,11 +50,7 @@ module.exports = async ({ github, context }) => {
       issue_number,
       assignees: [login],
     });
-    await comment(
-      issue_number,
-      `This issue was automatically unassigned from @${login} due to inactivity. ` +
-        `If you are still working on it, please comment here so a maintainer can reassign it.`
-    );
+    await comment(issue_number, message);
   };
 
   const openPrs = await paginate(github.rest.pulls.list, { state: "open" });
@@ -98,6 +94,25 @@ module.exports = async ({ github, context }) => {
           const events = await paginate(github.rest.issues.listEventsForTimeline, {
             issue_number: issue.number,
           });
+
+          const closedUnmergedPr = events.find(
+            event =>
+              event.event === "cross-referenced" &&
+              event.source?.issue?.pull_request &&
+              event.source.issue.state === "closed" &&
+              !event.source.issue.pull_request.merged_at &&
+              sameUser(event.source.issue.user?.login, login)
+          );
+
+          if (closedUnmergedPr) {
+            await unassign(
+              issue.number,
+              login,
+              `This issue was automatically unassigned from @${login} because their linked pull request #${closedUnmergedPr.source.issue.number} was closed without being merged.`
+            );
+            continue;
+          }
+
           const assignedAt = Math.max(
             0,
             ...events
@@ -191,7 +206,12 @@ module.exports = async ({ github, context }) => {
                 `This issue will be unassigned in 3 days unless there is further activity.`
             );
           } else if (Date.now() - Date.parse(warning.created_at) >= GRACE_PERIOD) {
-            await unassign(issue.number, login);
+            await unassign(
+              issue.number,
+              login,
+              `This issue was automatically unassigned from @${login} due to inactivity. ` +
+                `If you are still working on it, please comment here so a maintainer can reassign it.`
+            );
           }
         } catch (error) {
           failures++;
