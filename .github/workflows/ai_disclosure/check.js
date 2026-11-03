@@ -16,56 +16,11 @@
 // specific language governing permissions and limitations
 // under the License.
 
-const COMMENT_MARKER = "<!-- arrow-ai-disclosure-check -->";
+const fs = require("fs");
+
 const AUTHORSHIP_HEADING = "PR code and description written by:";
 const REVIEW_HEADING = "Reviewed before submission by:";
 
-const INCOMPLETE_COMMENT = `${COMMENT_MARKER}
-
-The AI disclosure in this pull request is missing or incomplete.
-
-Please complete both disclosure sections in the pull request description by selecting the applicable checkboxes. Once the disclosure is complete, you can mark the pull request as ready for review.
-
-If the disclosure is not present, add the following to the pull request description:
-
-**PR code and description written by:**
-
-- [ ] Human
-- [ ] AI
-
-**Reviewed before submission by:**
-
-- [ ] Human
-- [ ] AI
-- [ ] Not reviewed
-
-Once you have completed the disclosure, please manually mark this pull request as **Ready for review**.
-This pull request has been converted to Draft until the disclosure is completed.`;
-
-const AI_UNREVIEWED_COMMENT = `${COMMENT_MARKER}
-
-This pull request has been automatically closed because its authorship is AI-only and it has no human review.
-
-Contributions involving AI assistance are welcome. However, we require human involvement in the contribution and its review.
-
-If this classification is incorrect, please reopen the pull request and correct the disclosure.`;
-
-const SELF_REVIEW_COMMENT = `${COMMENT_MARKER}
-
-This pull request has been converted to Draft because it has not been reviewed by a human.
-
-Please review your contribution yourself before marking this pull request as ready for review.
-
-Once you have completed your review, update the review disclosure section and mark this pull request as Ready for review.`;
-
-const RESOLVED_COMMENT = `${COMMENT_MARKER}
-
-The AI disclosure is now complete. No further action is required.`;
-
-/**
- * Parses a disclosure section and returns its selected options.
- * Returns null when the section is missing, invalid, or incomplete.
- */
 function parseSection(lines, start, end, options) {
   const found = new Set();
   const selected = [];
@@ -84,7 +39,9 @@ function parseSection(lines, start, end, options) {
 
     found.add(option);
 
-    if (match[1].toLowerCase() === "x") selected.push(option);
+    if (match[1].toLowerCase() === "x") {
+      selected.push(option);
+    }
   }
 
   if (
@@ -107,10 +64,6 @@ function isHeading(line) {
   return /^#{1,6}\s/.test(trimmed) || /^\*\*.+\*\*$/.test(trimmed);
 }
 
-/**
- * Determines whether the disclosure is complete, requires self-review,
- * or must be closed because authorship is AI-only without human review.
- */
 function parseDisclosure(body) {
   const lines = body.split(/\r?\n/);
   const headings = lines.map(normalizeHeading);
@@ -141,21 +94,23 @@ function parseDisclosure(body) {
     ["Human", "AI", "Not reviewed"]
   );
 
-  if (!authorship || !review) return {status: "incomplete"};
+  if (!authorship || !review) {
+    return {status: "incomplete"};
+  }
 
   if (review.includes("Human")) {
-    return {status: "complete", authorship, review};
+    return {status: "complete"};
   }
 
   if (authorship.length === 1 && authorship[0] === "AI") {
-    return {status: "ai-unreviewed", authorship, review};
+    return {status: "ai-unreviewed"};
   }
 
-  return {status: "needs-human-review", authorship, review};
+  return {status: "needs-human-review"};
 }
 
 /**
- * Adds an AI disclosure comment to the pull request.
+ * Adds a comment to the pull request.
  */
 async function createDisclosureComment(
   github, context, pullRequestNumber, body
@@ -193,30 +148,41 @@ async function convertToDraft(github, context) {
   );
 }
 
-module.exports = async ({github, context}) => {
+module.exports = async ({github, context, core}) => {
   const pullRequest = context.payload.pull_request;
-  const pullRequestNumber = context.payload.number;
+  const pullRequestNumber = pullRequest.number;
 
   if (
     pullRequest.state !== "open" ||
     (pullRequest.draft && context.payload.action !== "ready_for_review") ||
-    pullRequest.user.type === "Bot"
+    pullRequest.user?.type === "Bot"
   ) {
+    core.info(`Skipping #${pullRequestNumber}: not an eligible pull request.`);
     return;
   }
 
   const result = parseDisclosure(pullRequest.body || "");
 
+  core.info(`Disclosure status for #${pullRequestNumber}: ${result.status}.`);
+
   if (result.status === "complete") {
     await createDisclosureComment(
-      github, context, pullRequestNumber, RESOLVED_COMMENT
+      github,
+      context,
+      pullRequestNumber,
+      `The AI disclosure is now complete. No further action is required.`
     );
     return;
   }
 
   if (result.status === "ai-unreviewed") {
     await createDisclosureComment(
-      github, context, pullRequestNumber, AI_UNREVIEWED_COMMENT
+      github,
+      context,
+      pullRequestNumber,
+      `This pull request has been automatically closed because its authorship is AI-only and it has no human review.
+
+        Contributions involving AI assistance are welcome. However, we require human involvement in the contribution and its review.`
     );
 
     await github.rest.pulls.update({
@@ -225,6 +191,8 @@ module.exports = async ({github, context}) => {
       pull_number: pullRequestNumber,
       state: "closed"
     });
+
+    core.info(`Closed #${pullRequestNumber}: AI-only authorship without human review.`);
     return;
   }
 
@@ -233,8 +201,12 @@ module.exports = async ({github, context}) => {
     context,
     pullRequestNumber,
     result.status === "incomplete"
-      ? INCOMPLETE_COMMENT
-      : SELF_REVIEW_COMMENT
+      ? fs.readFileSync(`${__dirname}/incomplete.md`, "utf8")
+      : `This pull request has been converted to Draft because it has not been reviewed by a human.
+
+          Please review your contribution yourself before marking this pull request as ready for review.
+
+          Once you have completed your review, update the review disclosure section and mark this pull request as Ready for review.`
   );
 
   await convertToDraft(github, context);
