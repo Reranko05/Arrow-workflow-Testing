@@ -56,7 +56,7 @@ This pull request has been converted to Draft because it has not been reviewed b
 
 Please review your contribution yourself before marking this pull request as ready for review.
 
-Once you have completed your review, update the review disclosure section and mark the pull request as Ready for review.`;
+Once you have completed your review, update the review disclosure section and mark this pull request as Ready for review.`;
 
 const RESOLVED_COMMENT = `${COMMENT_MARKER}
 
@@ -79,9 +79,11 @@ function parseSection(lines, start, end, options) {
     }
 
     const option = match[2];
+
     if (!options.includes(option) || found.has(option)) return null;
 
     found.add(option);
+
     if (match[1].toLowerCase() === "x") selected.push(option);
   }
 
@@ -127,18 +129,24 @@ function parseDisclosure(body) {
   const reviewEnd = lines.findIndex(
     (line, index) => index > reviewStart && isHeading(line)
   );
+
   const authorship = parseSection(
     lines, authorshipStart, reviewStart, ["Human", "AI"]
   );
+
   const review = parseSection(
-    lines, reviewStart, reviewEnd === -1 ? lines.length : reviewEnd,
+    lines,
+    reviewStart,
+    reviewEnd === -1 ? lines.length : reviewEnd,
     ["Human", "AI", "Not reviewed"]
   );
 
   if (!authorship || !review) return {status: "incomplete"};
+
   if (review.includes("Human")) {
     return {status: "complete", authorship, review};
   }
+
   if (authorship.length === 1 && authorship[0] === "AI") {
     return {status: "ai-unreviewed", authorship, review};
   }
@@ -147,53 +155,17 @@ function parseDisclosure(body) {
 }
 
 /**
- * Finds the bot's existing AI disclosure comment on a pull request.
+ * Adds an AI disclosure comment to the pull request.
  */
-async function findDisclosureComment(github, context, pullRequestNumber) {
-  const options = {
+async function createDisclosureComment(
+  github, context, pullRequestNumber, body
+) {
+  await github.rest.issues.createComment({
     owner: context.repo.owner,
     repo: context.repo.repo,
     issue_number: pullRequestNumber,
-    per_page: 100,
-    page: 1
-  };
-
-  while (true) {
-    const response = await github.rest.issues.listComments(options);
-    const comment = response.data.find(
-      item => item.user.type === "Bot" && item.body.includes(COMMENT_MARKER)
-    );
-    if (comment) return comment;
-    if (!/;\s*rel="next"/.test(response.headers.link || "")) return null;
-    options.page++;
-  }
-}
-
-/**
- * Creates or updates the AI disclosure comment on a pull request.
- */
-async function setDisclosureComment(
-  github, context, pullRequestNumber, body, create = true
-) {
-  const existing = await findDisclosureComment(
-    github, context, pullRequestNumber
-  );
-
-  if (existing) {
-    await github.rest.issues.updateComment({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      comment_id: existing.id,
-      body
-    });
-  } else if (create) {
-    await github.rest.issues.createComment({
-      owner: context.repo.owner,
-      repo: context.repo.repo,
-      issue_number: pullRequestNumber,
-      body
-    });
-  }
+    body
+  });
 }
 
 /**
@@ -236,16 +208,17 @@ module.exports = async ({github, context}) => {
   const result = parseDisclosure(pullRequest.body || "");
 
   if (result.status === "complete") {
-    await setDisclosureComment(
-      github, context, pullRequestNumber, RESOLVED_COMMENT, false
+    await createDisclosureComment(
+      github, context, pullRequestNumber, RESOLVED_COMMENT
     );
     return;
   }
 
   if (result.status === "ai-unreviewed") {
-    await setDisclosureComment(
+    await createDisclosureComment(
       github, context, pullRequestNumber, AI_UNREVIEWED_COMMENT
     );
+
     await github.rest.pulls.update({
       owner: context.repo.owner,
       repo: context.repo.repo,
@@ -255,11 +228,14 @@ module.exports = async ({github, context}) => {
     return;
   }
 
-  await setDisclosureComment(
+  await createDisclosureComment(
     github,
     context,
     pullRequestNumber,
-    result.status === "incomplete" ? INCOMPLETE_COMMENT : SELF_REVIEW_COMMENT
+    result.status === "incomplete"
+      ? INCOMPLETE_COMMENT
+      : SELF_REVIEW_COMMENT
   );
+
   await convertToDraft(github, context);
 };
