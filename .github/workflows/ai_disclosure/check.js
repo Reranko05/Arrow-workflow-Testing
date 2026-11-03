@@ -56,7 +56,7 @@ This pull request has been converted to Draft because it has not been reviewed b
 
 Please review your contribution yourself before marking this pull request as ready for review.
 
-Once you have completed your review, select Human (or Human and AI) in the review disclosure section and mark the pull request as Ready for review.`;
+Once you have completed your review, update the review disclosure section and mark the pull request as Ready for review.`;
 
 const RESOLVED_COMMENT = `${COMMENT_MARKER}
 
@@ -180,14 +180,12 @@ async function setDisclosureComment(
   );
 
   if (existing) {
-    if (existing.body !== body) {
-      await github.rest.issues.updateComment({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        comment_id: existing.id,
-        body
-      });
-    }
+    await github.rest.issues.updateComment({
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      comment_id: existing.id,
+      body
+    });
   } else if (create) {
     await github.rest.issues.createComment({
       owner: context.repo.owner,
