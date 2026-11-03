@@ -166,12 +166,6 @@ module.exports = async ({github, context, core}) => {
   core.info(`Disclosure status for #${pullRequestNumber}: ${result.status}.`);
 
   if (result.status === "complete") {
-    await createDisclosureComment(
-      github,
-      context,
-      pullRequestNumber,
-      `The AI disclosure is now complete. No further action is required.`
-    );
     return;
   }
 
@@ -181,7 +175,6 @@ module.exports = async ({github, context, core}) => {
       context,
       pullRequestNumber,
       `This pull request has been automatically closed because its authorship is AI-only and it has no human review.
-
         Contributions involving AI assistance are welcome. However, we require human involvement in the contribution and its review.`
     );
 
@@ -202,11 +195,9 @@ module.exports = async ({github, context, core}) => {
     pullRequestNumber,
     result.status === "incomplete"
       ? fs.readFileSync(`${__dirname}/incomplete.md`, "utf8")
-      : `This pull request has been converted to Draft because it has not been reviewed by a human.
-
-          Please review your contribution yourself before marking this pull request as ready for review.
-
-          Once you have completed your review, update the review disclosure section and mark this pull request as Ready for review.`
+      : `This pull request has been converted to Draft because it has not been reviewed by a human. Please review your contribution 
+          yourself before marking this pull request as ready for review. 
+          \nOnce you have completed your review, update the review disclosure section and mark this pull request as Ready for review.`
   );
 
   await convertToDraft(github, context);
