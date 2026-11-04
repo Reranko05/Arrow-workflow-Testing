@@ -23,23 +23,45 @@ const PAUSE_LABELS = [
   "awaiting merge",
 ];
 const DAY = 24 * 60 * 60 * 1000;
-const WARN_AFTER = 30;
-const GRACE_PERIOD = 30;
+const INACTIVITY_PERIOD = 15;
 
+/**
+ * Returns whether two GitHub usernames match, ignoring case.
+ *
+ * @param {String} a
+ * @param {String} b
+ */
 const sameUser = (a, b) =>
   Boolean(a && b && a.toLowerCase() === b.toLowerCase());
 
-const warningMarker = login =>
-  `<!-- unassign-bot-warning:${login.toLowerCase()} -->`;
-
 module.exports = async ({ github, context }) => {
   const { owner, repo } = context.repo;
+
+  /**
+   * Retrieves all pages of a GitHub API response.
+   *
+   * @param {Function} method
+   * @param {Object} params
+   */
   const paginate = (method, params) =>
     github.paginate(method, { owner, repo, per_page: 100, ...params });
 
+  /**
+   * Posts a comment on the specified issue.
+   *
+   * @param {Number} issue_number
+   * @param {String} body
+   */
   const comment = (issue_number, body) =>
     github.rest.issues.createComment({ owner, repo, issue_number, body });
 
+  /**
+   * Removes the user from an issue and explains why they were unassigned.
+   *
+   * @param {Number} issue_number
+   * @param {String} login
+   * @param {String} message
+   */
   const unassign = async (issue_number, login, message) => {
     await github.rest.issues.removeAssignees({
       owner,
@@ -53,6 +75,7 @@ module.exports = async ({ github, context }) => {
   const processed = new Set();
   let failures = 0;
 
+  // Process each newcomer label, avoiding duplicate issues.
   for (const label of LABELS) {
     const issues = await paginate(github.rest.issues.listForRepo, {
       state: "open",
@@ -69,6 +92,7 @@ module.exports = async ({ github, context }) => {
       }
       processed.add(issue.number);
 
+      // Retrieve the timeline once and reuse it for every assignee.
       let events;
       try {
         events = await paginate(github.rest.issues.listEventsForTimeline, {
@@ -82,6 +106,7 @@ module.exports = async ({ github, context }) => {
 
       for (const { login } of issue.assignees) {
         try {
+          // Use the most recent assignment to reset the inactivity period.
           const assignedAt = Math.max(
             0,
             ...events
@@ -96,6 +121,7 @@ module.exports = async ({ github, context }) => {
 
           if (!assignedAt) continue;
 
+          // Consider only open PRs authored by the assignee.
           const linkedPrs = events
             .filter(
               event =>
@@ -107,6 +133,7 @@ module.exports = async ({ github, context }) => {
               pr => pr.state === "open" && sameUser(pr.user?.login, login)
             );
 
+          // Do not unassign users while their PRs are awaiting review or merge.
           if (
             linkedPrs.some(pr =>
               pr.labels?.some(({ name }) =>
@@ -117,6 +144,7 @@ module.exports = async ({ github, context }) => {
             continue;
           }
 
+          // Start with the assignment time and consider subsequent issue comments.
           let lastActivity = assignedAt;
 
           for (const event of events) {
@@ -131,6 +159,7 @@ module.exports = async ({ github, context }) => {
             }
           }
 
+          // Use the latest update time of linked PRs as an activity signal.
           for (const pr of linkedPrs) {
             const updatedAt = Date.parse(pr.updated_at);
             if (Number.isFinite(updatedAt)) {
@@ -138,33 +167,15 @@ module.exports = async ({ github, context }) => {
             }
           }
 
-          const now = Date.now();
-          if (now - lastActivity < WARN_AFTER) continue;
+          if (Date.now() - lastActivity < INACTIVITY_PERIOD) continue;
 
-          const marker = warningMarker(login);
-          const warning = events.find(
-            event =>
-              event.event === "commented" &&
-              event.body?.includes(marker) &&
-              Date.parse(event.created_at) >= lastActivity
+          await unassign(
+            issue.number,
+            login,
+            `@${login}, you have been automatically unassigned from this issue ` +
+              `after 8 days without activity. If you are still working on it, ` +
+              `please comment here so a maintainer can reassign it.`
           );
-
-          if (!warning) {
-            await comment(
-              issue.number,
-              `${marker}\n@${login}, there has been no qualifying activity for 5 days. ` +
-                `This issue will be unassigned in 3 days unless there is further activity.`
-            );
-          } else if (
-            now - Date.parse(warning.created_at) >= GRACE_PERIOD
-          ) {
-            await unassign(
-              issue.number,
-              login,
-              `This issue was automatically unassigned from @${login} due to inactivity. ` +
-                `If you are still working on it, please comment here so a maintainer can reassign it.`
-            );
-          }
         } catch (error) {
           failures++;
           console.error(`Failed to process #${issue.number} for ${login}`, error);
