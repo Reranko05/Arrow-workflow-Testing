@@ -1,3 +1,4 @@
+
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -16,15 +17,13 @@
 // under the License.
 
 const LABELS = ["good-first-issue", "good-second-issue"];
-const DAY = 24 * 60 * 60 * 1000;
-const INACTIVITY_PERIOD = 120;
+const DAY = 60 * 1000;
+const INACTIVITY_DAYS = 1;
+const INACTIVITY_PERIOD = INACTIVITY_DAYS * DAY;
 
-/**
- * Returns whether two GitHub usernames match, ignoring case.
- *
- * @param {String} a
- * @param {String} b
- */
+// For testing, temporarily use:
+// const INACTIVITY_PERIOD = 2 * 60 * 1000;
+
 const sameUser = (a, b) =>
   Boolean(a && b && a.toLowerCase() === b.toLowerCase());
 
@@ -63,11 +62,18 @@ module.exports = async ({ github, context }) => {
       issue_number,
       assignees: [login],
     });
+    console.log(`Unassigned ${login} from issue #${issue_number}`);
+
     await comment(issue_number, message);
   };
 
   const processed = new Set();
+  const closedPrs = [];
+  const unassignedIssues = [];
   let failures = 0;
+
+  console.log(`Checking inactive assignments in ${owner}/${repo}`);
+  console.log(`Inactivity threshold: ${INACTIVITY_DAYS} days`);
 
   // Process each newcomer label, avoiding duplicate issues.
   for (const label of LABELS) {
@@ -75,6 +81,8 @@ module.exports = async ({ github, context }) => {
       state: "open",
       labels: label,
     });
+
+    console.log(`Found ${issues.length} issues with label: ${label}`);
 
     for (const issue of issues) {
       if (
@@ -94,7 +102,10 @@ module.exports = async ({ github, context }) => {
         });
       } catch (error) {
         failures++;
-        console.error(`Failed to retrieve timeline for #${issue.number}`, error);
+        console.error(
+          `Failed to retrieve timeline for issue #${issue.number}`,
+          error
+        );
         continue;
       }
 
@@ -113,7 +124,12 @@ module.exports = async ({ github, context }) => {
               .filter(Number.isFinite)
           );
 
-          if (!assignedAt) continue;
+          if (!assignedAt) {
+            console.log(
+              `Skipping ${login} on issue #${issue.number}: assignment event not found`
+            );
+            continue;
+          }
 
           // Find the assignee's linked PR. Each contributor is expected
           // to have at most one linked PR for a particular issue.
@@ -128,13 +144,17 @@ module.exports = async ({ github, context }) => {
           let pr;
 
           if (linkedPr) {
-            // Fetch the latest PR state and activity timestamp.
             const response = await github.rest.pulls.get({
               owner,
               repo,
               pull_number: linkedPr.number,
             });
             pr = response.data;
+
+            console.log(
+              `Found linked PR #${pr.number} for issue #${issue.number} ` +
+              `(author: ${pr.user?.login}, state: ${pr.state})`
+            );
 
             // Only an open PR authored by the assignee counts as activity.
             if (
@@ -146,11 +166,25 @@ module.exports = async ({ github, context }) => {
                 lastActivity = Math.max(lastActivity, updatedAt);
               }
             }
+          } else {
+            console.log(
+              `No linked PR found for ${login} on issue #${issue.number}`
+            );
           }
 
-          if (Date.now() - lastActivity < INACTIVITY_PERIOD) continue;
+          const inactiveFor = Date.now() - lastActivity;
+
+          if (inactiveFor < INACTIVITY_PERIOD) {
+            console.log(
+              `Keeping ${login} assigned to issue #${issue.number}: ` +
+              `${Math.floor(inactiveFor / DAY)} days of inactivity`
+            );
+            continue;
+          }
 
           // Close the linked PR before unassigning the contributor.
+          let closedPrNumber;
+
           if (
             pr?.state === "open" &&
             sameUser(pr.user?.login, login)
@@ -161,26 +195,65 @@ module.exports = async ({ github, context }) => {
               pull_number: pr.number,
               state: "closed",
             });
+
+            closedPrNumber = pr.number;
+            closedPrs.push({
+              issue: issue.number,
+              pr: pr.number,
+              assignee: login,
+            });
+
+            console.log(
+              `Closed PR #${pr.number} (issue #${issue.number}, assignee: ${login})`
+            );
+          } else {
+            console.log(
+              `No open linked PR to close for issue #${issue.number} ` +
+              `(assignee: ${login})`
+            );
           }
 
           await unassign(
             issue.number,
             login,
             `@${login}, you have been automatically unassigned from this issue ` +
-              `after 15 days without activity. ` +
-              (pr?.state === "open"
-                ? `Your linked PR #${pr.number} has also been closed. `
+              `after ${INACTIVITY_DAYS} days without activity. ` +
+              (closedPrNumber
+                ? `Your linked PR #${closedPrNumber} has also been closed. `
                 : "") +
               `If you are still interested in working on this issue, ` +
               `please ask a maintainer to reassign it and reopen your PR.`
           );
+
+          unassignedIssues.push({
+            issue: issue.number,
+            assignee: login,
+          });
         } catch (error) {
           failures++;
-          console.error(`Failed to process #${issue.number} for ${login}`, error);
+          console.error(
+            `Failed to process issue #${issue.number} for ${login}`,
+            error
+          );
         }
       }
     }
   }
+
+  console.log("\n--- Inactive contributor workflow summary ---");
+
+  console.log(`Closed PRs: ${closedPrs.length}`);
+  for (const { issue, pr, assignee } of closedPrs) {
+    console.log(`  PR #${pr} (issue #${issue}, assignee: ${assignee})`);
+  }
+
+  console.log(`Unassignments: ${unassignedIssues.length}`);
+  for (const { issue, assignee } of unassignedIssues) {
+    console.log(`  Issue #${issue} (assignee: ${assignee})`);
+  }
+
+  console.log(`Failures: ${failures}`);
+  console.log("--- End of summary ---");
 
   if (failures) {
     throw new Error(`Failed to process ${failures} assignment(s).`);
