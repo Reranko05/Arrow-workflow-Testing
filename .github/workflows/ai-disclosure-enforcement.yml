@@ -50,7 +50,6 @@ jobs:
         run: |
           ls -la .github/workflows/ai_disclosure/
           test -f .github/workflows/ai_disclosure/check.js
-          test -f .github/workflows/ai_disclosure/incomplete.md
 
       - name: Check AI disclosure
         uses: actions/github-script@v7

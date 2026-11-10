@@ -15,14 +15,16 @@
 // specific language governing permissions and limitations
 // under the License.
 
-const fs = require("fs");
-
 const AUTHORSHIP_HEADING = "PR code and description written by:";
 const REVIEW_HEADING = "Reviewed before submission by:";
 
-const INCOMPLETE_COMMENT = fs.readFileSync(
-  `${__dirname}/incomplete.md`, "utf8"
-);
+const INCOMPLETE_COMMENT = `The AI disclosure in this pull request is missing or incomplete.
+
+Please update your pull request description using the [Apache Arrow pull request template](https://github.com/apache/arrow/blob/main/.github/pull_request_template.md) and complete both AI disclosure sections.
+
+This pull request has been closed. Once you have corrected the disclosure, please reopen it for review.
+
+For future contributions, please follow the Apache Arrow pull request template.`;
 
 function parseSection(lines, start, end, options) {
   const found = new Set();
