@@ -1,4 +1,3 @@
-
 // Licensed to the Apache Software Foundation (ASF) under one
 // or more contributor license agreements.  See the NOTICE file
 // distributed with this work for additional information
@@ -21,6 +20,10 @@ const fs = require("fs");
 const AUTHORSHIP_HEADING = "PR code and description written by:";
 const REVIEW_HEADING = "Reviewed before submission by:";
 
+const INCOMPLETE_COMMENT = fs.readFileSync(
+  `${__dirname}/incomplete.md`, "utf8"
+);
+
 function parseSection(lines, start, end, options) {
   const found = new Set();
   const selected = [];
@@ -29,24 +32,23 @@ function parseSection(lines, start, end, options) {
     const match = line.match(/^\s*-\s+\[([ xX])\]\s*(.*?)\s*$/);
 
     if (!match) {
+      // Reject malformed checkbox entries.
       if (/^\s*-\s+\[/.test(line)) return null;
       continue;
     }
 
     const option = match[2];
 
+    // Each expected option must appear exactly once.
     if (!options.includes(option) || found.has(option)) return null;
 
     found.add(option);
-
-    if (match[1].toLowerCase() === "x") {
-      selected.push(option);
-    }
+    if (match[1].toLowerCase() === "x") selected.push(option);
   }
 
   if (
     found.size !== options.length ||
-    selected.length === 0 ||
+    !selected.length ||
     (selected.includes("Not reviewed") && selected.length > 1)
   ) {
     return null;
@@ -55,32 +57,30 @@ function parseSection(lines, start, end, options) {
   return selected;
 }
 
-function normalizeHeading(line) {
-  return line.trim().replace(/^\*\*(.*?)\*\*$/, "$1");
-}
-
-function isHeading(line) {
-  const trimmed = line.trim();
-  return /^#{1,6}\s/.test(trimmed) || /^\*\*.+\*\*$/.test(trimmed);
-}
-
 function parseDisclosure(body) {
   const lines = body.split(/\r?\n/);
-  const headings = lines.map(normalizeHeading);
+  const headings = lines.map(line =>
+    line.trim().replace(/^\*\*(.*?)\*\*$/, "$1")
+  );
+
   const authorshipStart = headings.indexOf(AUTHORSHIP_HEADING);
   const reviewStart = headings.indexOf(REVIEW_HEADING);
 
+  // Both headings must exist exactly once and in the correct order.
   if (
     authorshipStart === -1 ||
     reviewStart <= authorshipStart ||
     headings.lastIndexOf(AUTHORSHIP_HEADING) !== authorshipStart ||
     headings.lastIndexOf(REVIEW_HEADING) !== reviewStart
   ) {
-    return {status: "incomplete"};
+    return "incomplete";
   }
 
+  // Find where the review section ends.
   const reviewEnd = lines.findIndex(
-    (line, index) => index > reviewStart && isHeading(line)
+    (line, index) =>
+      index > reviewStart &&
+      (/^#{1,6}\s/.test(line.trim()) || /^\*\*.+\*\*$/.test(line.trim()))
   );
 
   const authorship = parseSection(
@@ -94,19 +94,12 @@ function parseDisclosure(body) {
     ["Human", "AI", "Not reviewed"]
   );
 
-  if (!authorship || !review) {
-    return {status: "incomplete"};
-  }
+  if (!authorship || !review) return "incomplete";
+  if (review.includes("Human")) return "complete";
 
-  if (review.includes("Human")) {
-    return {status: "complete"};
-  }
-
-  if (authorship.length === 1 && authorship[0] === "AI") {
-    return {status: "ai-unreviewed"};
-  }
-
-  return {status: "needs-human-review"};
+  return authorship.length === 1 && authorship[0] === "AI"
+    ? "ai-only"
+    : "needs-human-review";
 }
 
 /**
@@ -125,80 +118,105 @@ async function createDisclosureComment(
 
 /**
  * Converts the pull request to Draft unless it is already a draft.
- *
- * @param {Object} github
- * @param {Object} context
  */
-async function convertToDraft(github, context) {
-  if (context.payload.pull_request.draft) return;
+async function convertToDraft(github, pullRequest) {
+  if (pullRequest.draft) return;
 
   await github.graphql(
-    `
-      mutation ($pullRequestId: ID!) {
-        convertPullRequestToDraft(
-          input: {pullRequestId: $pullRequestId}
-        ) {
-          pullRequest {
-            id
-          }
+    `mutation($id: ID!) {
+      convertPullRequestToDraft(input: {pullRequestId: $id}) {
+        pullRequest {
+          id
         }
       }
-    `,
-    {pullRequestId: context.payload.pull_request.node_id}
+    }`,
+    {id: pullRequest.node_id}
   );
 }
 
 module.exports = async ({github, context, core}) => {
-  const pullRequest = context.payload.pull_request;
-  const pullRequestNumber = pullRequest.number;
+  const run = context.payload.workflow_run;
+  const head = run.head_repository;
 
   if (
-    pullRequest.state !== "open" ||
-    (pullRequest.draft && context.payload.action !== "ready_for_review") ||
-    pullRequest.user?.type === "Bot"
+    run.event !== "pull_request" ||
+    !head?.owner?.login ||
+    !head.full_name ||
+    !run.head_branch ||
+    !run.head_sha
   ) {
-    core.info(`Skipping #${pullRequestNumber}: not an eligible pull request.`);
+    core.info("Unable to identify an associated pull request.");
     return;
   }
 
-  const result = parseDisclosure(pullRequest.body || "");
+  // workflow_run may not contain associated PR details for fork PRs.
+  // Fall back to looking up PRs by their source repository and branch.
+  const candidates = run.pull_requests?.length
+    ? run.pull_requests
+    : await github.paginate(
+        github.rest.pulls.list,
+        {
+          owner: context.repo.owner,
+          repo: context.repo.repo,
+          state: "open",
+          head: `${head.owner.login}:${run.head_branch}`,
+          per_page: 100
+        }
+      );
 
-  core.info(`Disclosure status for #${pullRequestNumber}: ${result.status}.`);
-
-  if (result.status === "complete") {
-    return;
-  }
-
-  if (result.status === "ai-unreviewed") {
-    await createDisclosureComment(
-      github,
-      context,
-      pullRequestNumber,
-      `This pull request has been automatically closed because its authorship is AI-only and it has no human review.
-        Contributions involving AI assistance are welcome. However, we require human involvement in the contribution and its review.`
-    );
-
-    await github.rest.pulls.update({
+  for (const candidate of candidates) {
+    const {data: pr} = await github.rest.pulls.get({
       owner: context.repo.owner,
       repo: context.repo.repo,
-      pull_number: pullRequestNumber,
-      state: "closed"
+      pull_number: candidate.number
     });
 
-    core.info(`Closed #${pullRequestNumber}: AI-only authorship without human review.`);
-    return;
+    // Ignore closed PRs, outdated runs, and bot-authored PRs.
+    if (
+      pr.state !== "open" ||
+      pr.head.sha !== run.head_sha ||
+      pr.head.repo?.full_name.toLowerCase() !== head.full_name.toLowerCase() ||
+      pr.user?.type === "Bot"
+    ) {
+      continue;
+    }
+
+    const status = parseDisclosure(pr.body || "");
+
+    core.info(`Disclosure status for #${pr.number}: ${status}.`);
+
+    // A valid disclosure requires no action.
+    if (status === "complete") continue;
+
+    const messages = {
+      incomplete: INCOMPLETE_COMMENT,
+
+      "ai-only": `This pull request has been automatically closed because its authorship is AI-only and it has no human review.
+
+Contributions involving AI assistance are welcome. However, we require human involvement in the contribution and its review.`,
+
+      "needs-human-review": `This pull request has been converted to Draft because it has not been reviewed by a human.
+
+Please review your contribution, update the review disclosure section, and mark the pull request as Ready for review.`
+    };
+
+    await createDisclosureComment(
+      github, context, pr.number, messages[status]
+    );
+
+    // Close missing/incomplete disclosures and AI-only contributions
+    // without human review. Other contributions must receive human review.
+    if (status === "incomplete" || status === "ai-only") {
+      await github.rest.pulls.update({
+        owner: context.repo.owner,
+        repo: context.repo.repo,
+        pull_number: pr.number,
+        state: "closed"
+      });
+    } else {
+      await convertToDraft(github, pr);
+    }
   }
-
-  await createDisclosureComment(
-    github,
-    context,
-    pullRequestNumber,
-    result.status === "incomplete"
-      ? fs.readFileSync(`${__dirname}/incomplete.md`, "utf8")
-      : `This pull request has been converted to Draft because it has not been reviewed by a human. Please review your contribution 
-          yourself before marking this pull request as ready for review. 
-          \nOnce you have completed your review, update the review disclosure section and mark this pull request as Ready for review.`
-  );
-
-  await convertToDraft(github, context);
 };
+
+module.exports.parseDisclosure = parseDisclosure;
